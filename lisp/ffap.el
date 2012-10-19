@@ -1036,6 +1036,118 @@ possibly a major-mode name, or one of the symbol
   ;; Added at suggestion of RHOGEE (for ff-paths), 7/24/95.
   "Last string returned by `ffap-string-at-point'.")
 
+;; Test cases: (let ((ffap-file-name-with-spaces-flag t)) (ffap-string-at-point))
+;;
+;; c:/Program Files/Open Text Evaluation Media/Open Text Exceed 14 x86/Program here.txt
+;; c:/Program Files/Open Text Evaluation Media/Open Text Exceed 14 x86/Program Files/Hummingbird/
+;; c:\Program Files\Open Text Evaluation Media\Open Text Exceed 14 x86\Program Files\Hummingbird\
+;;
+;; c:\Program Files\Freescale\CW for MPC55xx and MPC56xx 2.10\PowerPC_EABI_Tools\Command_Line_Tools\CLT_Usage_Notes.txt
+;; C:\temp\prog.log or prog1.exe on Windows or /var/log/prog.log on Unix.
+
+(defvar ffap-file-name-with-spaces-flag (memq system-type '(ms-dos windows-nt))
+  "If non-nil, look for paths containing spaces in `ffap-string-at-point'.
+Enabled in W32 by default.")
+
+(defun ffap-cygwin-path (path)
+  "Convert \"<drive>:\" into \"/cygdrive/<drive>\"."
+  (if (string-match "^\\([a-zA-Z]\\):[/\\\\]\\(.*\\)" path)
+      (let ((drive (downcase (match-string 1 path)))
+	    (str (match-string 2 path)))
+	(format "/cygdrive/%s/%s"
+		drive
+		(replace-regexp-in-string "[\\\\]" "/" str)))
+    path))
+
+(defun ffap-cygwin-convert (path)
+  "If Cygwin, convert \"<drive>:\" into \"/cygdrive/<drive>\"."
+  (if (string-match "cygwin" (emacs-version))
+      (ffap-cygwin-path path)
+    path))
+
+(defun ffap-search-forward-file-end (&optional path-separator)
+  "Position point at file's maximum ending (including spaces).
+Call `ffap-search-backward-file-end' to fine tune the point afterwards"
+  (or path-separator
+      (setq path-separator "/"))
+  (let* ((chars  ;expected chars in file name
+	  (concat "[^][<>()\"'`;,#*|"
+		  ;; exclude the opposite as we know the separator
+		  (if (string-equal path-separator "/")
+		      "\\\\"
+		    "/")
+		  "\t\r\n^]"))
+	 (re (concat
+	      chars "*"
+	      (if path-separator
+		  (regexp-quote path-separator)
+		"/")
+	      chars "*")))
+    (when (looking-at re)
+      (goto-char (match-end 0)))))
+
+(defun ffap-search-backward-file-end (&optional path-separator)
+  "Search backward and guess where file would probably end.
+Suppose the cursor is somewhere that contains spaces. The real file end
+is in fact somewhere else. A demonstration:
+
+  C:\temp\file.log on Windows or /tmp/file.log on Unix
+  =============================== (now)
+  ---------------- (final)
+
+The strategy is to search backward until PATH-SEPARATOR which defaults to
+\"/\" and then take educated guesses.
+
+If found, move point and return point."
+  (or path-separator
+      (setq path-separator "/"))
+  (let ((opoint (point))
+	point)
+    (when (re-search-backward
+	   (regexp-quote path-separator) (line-beginning-position) t)
+      (forward-char 1)
+      (cond
+       ((looking-at ".*?\\.")
+	(goto-char (match-end 0))
+	(cond
+	 ((looking-at "[ \t\r\n]\\|$")
+	  (setq point (1- (point))))
+	 ((looking-at "[a-zA-Z0-9.]+")	;file extension
+	  (setq point (match-end 0))))))
+      (when point
+	(goto-char point)
+	point))))
+
+(defun ffap-path-separator-near-point ()
+  "Search backward and forward for closest slash or backlash in line.
+Return string slash or backslash. Point is moved to closest position."
+  (let ((point (point))
+	str
+	pos)
+    (if (looking-at ".*?/")
+	(setq str "/"
+	      pos (match-end 0)))
+    (if (looking-at ".*?\\\\")
+	(if (or (null pos)
+		(< (match-end 0) pos))
+	    (setq str "\\"
+		  pos (match-end 0))))
+    (goto-char point)
+    (if (re-search-backward "/" (line-beginning-position) t)
+	(if (or (null pos)
+		(< (- point (point)) (- pos point)))
+	    (setq str "/"
+		  pos (1+ (point)))))	;1+ to keep cursor at the end of char
+    (goto-char point)
+    (if (re-search-backward "\\\\" (line-beginning-position) t)
+	(if (or (null pos)
+		(< (- point (point)) (- pos point)))
+	    (setq str "\\"
+		  pos (1+ (point)))))
+    (if pos
+	(goto-char pos))
+    str))
+
 (defun ffap-string-at-point (&optional mode)
   "Return a string of characters from around point.
 MODE (defaults to value of `major-mode') is a symbol used to look up string
@@ -1043,26 +1155,45 @@ syntax parameters in `ffap-string-at-point-mode-alist'.
 If MODE is not found, we use `file' instead of MODE.
 If the region is active, return a string from the region.
 Sets `ffap-string-at-point' and `ffap-string-at-point-region'."
-  (let* ((args
-	  (cdr
-	   (or (assq (or mode major-mode) ffap-string-at-point-mode-alist)
-	       (assq 'file ffap-string-at-point-mode-alist))))
-	 (pt (point))
-	 (str
-	  (if (and transient-mark-mode mark-active)
-	      (buffer-substring
-	       (setcar ffap-string-at-point-region (region-beginning))
-	       (setcar (cdr ffap-string-at-point-region) (region-end)))
-	    (buffer-substring
-	     (save-excursion
-	       (skip-chars-backward (car args))
-	       (skip-chars-forward (nth 1 args) pt)
-	       (setcar ffap-string-at-point-region (point)))
-	     (save-excursion
-	       (skip-chars-forward (car args))
-	       (skip-chars-backward (nth 2 args) pt)
-	       (setcar (cdr ffap-string-at-point-region) (point)))))))
+  (let* ((cygwin-p (string-match "cygwin" (emacs-version)))
+	 path-separator
+	 beg
+	 end
+	 (args
+          (cdr
+           (or (assq (or mode major-mode) ffap-string-at-point-mode-alist)
+               (assq 'file ffap-string-at-point-mode-alist))))
+         (pt (point))
+         (str
+          (if (and transient-mark-mode mark-active)
+              (buffer-substring
+               (setcar ffap-string-at-point-region (region-beginning))
+               (setcar (cdr ffap-string-at-point-region) (region-end)))
+            (buffer-substring
+             (save-excursion
+	       (if (and ffap-file-name-with-spaces-flag
+			(memq mode '(nil file)))
+		   (when (setq path-separator (ffap-path-separator-near-point))
+		     (while (re-search-backward
+			     (regexp-quote path-separator)
+			     (line-beginning-position) t)
+		       (goto-char (match-beginning 0)))))
+               (skip-chars-backward (car args))
+               (skip-chars-forward (nth 1 args) pt)
+               (setcar ffap-string-at-point-region (point))
+	       (setq beg (point)))
+             (save-excursion
+               (skip-chars-forward (car args))
+               (skip-chars-backward (nth 2 args) pt)
+	       (setq end (point))
+	       (when (and ffap-file-name-with-spaces-flag
+			  (memq mode '(nil file)))
+		 (ffap-search-forward-file-end path-separator)
+		 (ffap-search-backward-file-end path-separator)
+		 (setq end (point)))
+               (setcar (cdr ffap-string-at-point-region) end))))))
     (set-text-properties 0 (length str) nil str)
+    (setq str (ffap-cygwin-convert str))
     (setq ffap-string-at-point str)))
 
 (defun ffap-string-around ()
