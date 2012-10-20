@@ -1048,25 +1048,9 @@ possibly a major-mode name, or one of the symbol
   "If non-nil, enable looking for paths with spaces in `ffap-string-at-point'.
 Enabled in W32 by default.")
 
-(defun ffap-cygwin-path (path)
-  "Convert \"<drive>:\" into \"/cygdrive/<drive>\"."
-  (if (string-match "^\\([a-zA-Z]\\):[/\\\\]\\(.*\\)" path)
-      (let ((drive (downcase (match-string 1 path)))
-	    (str (match-string 2 path)))
-	(format "/cygdrive/%s/%s"
-		drive
-		(replace-regexp-in-string "[\\\\]" "/" str)))
-    path))
-
-(defun ffap-cygwin-convert (path)
-  "If in Cygwin, convert \"<drive>:\" to \"/cygdrive/<drive>\"."
-  (if (eq system-type 'cygwin)
-      (ffap-cygwin-path path)
-    path))
-
-(defun ffap-search-backward-file-end (&optional path-separator end)
+(defun ffap-search-backward-file-end (&optional dir-separator end)
   "Search backward position point where file would probably end.
-Optional PATH-SEPARATOR defaults to \"/\". The search maximum is
+Optional DIR-SEPARATOR defaults to \"/\". The search maximum is
 `line-end-position' or optional END point.
 
 Suppose the cursor is somewhere that might be near end of file,
@@ -1082,20 +1066,25 @@ after the file extension:
   =============================== (before)
   ---------------- (after)
 
-The strategy is to search backward until PATH-SEPARATOR which defaults to
+The strategy is to search backward until DIR-SEPARATOR which defaults to
 \"/\" and then take educated guesses.
 
 Move point and return point if an adjustment was done."
-  (or path-separator
-      (setq path-separator "/"))
-  (let (point
+  (or dir-separator
+      (setq dir-separator "/"))
+  (let ((opoint (point))
+	point
 	puct
 	end
 	whitespace-p)
     (when (re-search-backward
-	   (regexp-quote path-separator) (line-beginning-position) t)
-      (forward-char 1)			 ;at the very beginning of match
-      (when (looking-at ".*?\\([][<>()\"'`,.:;]\\)") ;until typical punctuation
+	   (regexp-quote dir-separator) (line-beginning-position) t)
+      (forward-char 1)			 ;move to the beginning of match
+      ;; until typical punctuation
+      (when (re-search-forward "\\([][<>()\"'`,.:;]\\)"
+			       (or end
+				   (line-end-position))
+			       t)
 	(setq end (match-end 0))
 	(setq punct (match-string 1))
 	(setq whitespace-p (looking-at "[ \t\r\n]\\|$"))
@@ -1105,37 +1094,38 @@ Move point and return point if an adjustment was done."
 	       whitespace-p)		     ;end of sentence
 	  (setq point (1- (point))))
 	 ((and (string-equal punct ".")
-	       (looking-at "[a-zA-Z0-9.]+")) ;possibly file extension
+	       (looking-at "[a-zA-Z0-9.]+")) ;possibly file extensionl
 	  (setq point (match-end 0)))
 	 (t
 	  (setq point (point)))))
+      (goto-char opoint)
       (when point
 	(goto-char point)
 	point))))
 
-(defun ffap-search-forward-file-end (&optional path-separator)
-  "Search PATH-SEPARATOR and position point at file's maximum ending (including spaces).
-Optional PATH-SEPARATOR defaults to \"/\".
+(defun ffap-search-forward-file-end (&optional dir-separator)
+  "Search DIR-SEPARATOR and position point at file's maximum ending (including spaces).
+Optional DIR-SEPARATOR defaults to \"/\".
 Call `ffap-search-backward-file-end' to refine the ending point."
-  (or path-separator
-      (setq path-separator "/"))
+  (or dir-separator
+      (setq dir-separator "/"))
   (let* ((chars  ;expected chars in file name
 	  (concat "[^][^<>()\"'`;,#*|"
 		  ;; exclude the opposite as we know the separator
-		  (if (string-equal path-separator "/")
+		  (if (string-equal dir-separator "/")
 		      "\\\\"
 		    "/")
 		  "\t\r\n]"))
 	 (re (concat
 	      chars "*"
-	      (if path-separator
-		  (regexp-quote path-separator)
+	      (if dir-separator
+		  (regexp-quote dir-separator)
 		"/")
 	      chars "*")))
     (when (looking-at re)
       (goto-char (match-end 0)))))
 
-(defun ffap-path-separator-near-point ()
+(defun ffap-dir-separator-near-point ()
   "Search backward and forward for closest slash or backlash in line.
 Return string slash or backslash. Point is moved to closest position."
   (let ((point (point))
@@ -1173,7 +1163,7 @@ If MODE is not found, we use `file' instead of MODE.
 If the region is active, return a string from the region.
 Sets `ffap-string-at-point' and `ffap-string-at-point-region'."
   (let* ((cygwin-p (string-match "cygwin" (emacs-version)))
-	 path-separator
+	 dir-separator
 	 beg
 	 end
 	 (args
@@ -1190,9 +1180,9 @@ Sets `ffap-string-at-point' and `ffap-string-at-point-region'."
              (save-excursion
 	       (if (and ffap-file-name-with-spaces-flag
 			(memq mode '(nil file)))
-		   (when (setq path-separator (ffap-path-separator-near-point))
+		   (when (setq dir-separator (ffap-dir-separator-near-point))
 		     (while (re-search-backward
-			     (regexp-quote path-separator)
+			     (regexp-quote dir-separator)
 			     (line-beginning-position) t)
 		       (goto-char (match-beginning 0)))))
                (skip-chars-backward (car args))
@@ -1205,12 +1195,14 @@ Sets `ffap-string-at-point' and `ffap-string-at-point-region'."
 	       (setq end (point))
 	       (when (and ffap-file-name-with-spaces-flag
 			  (memq mode '(nil file)))
-		 (ffap-search-forward-file-end path-separator)
-		 (ffap-search-backward-file-end path-separator)
+		 (ffap-search-forward-file-end dir-separator)
+		 (ffap-search-backward-file-end dir-separator)
 		 (setq end (point)))
                (setcar (cdr ffap-string-at-point-region) end))))))
     (set-text-properties 0 (length str) nil str)
-    (setq str (ffap-cygwin-convert str))
+    (if (and (eq system-type 'cygwin)
+	     (fboundp 'cygwin-convert-path-from-windows))
+	(setq str (cygwin-convert-path-from-windows str)))
     (setq ffap-string-at-point str)))
 
 (defun ffap-string-around ()
