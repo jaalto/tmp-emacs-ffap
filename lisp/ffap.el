@@ -1041,12 +1041,11 @@ possibly a major-mode name, or one of the symbol
 ;; c:/Program Files/Open Text Evaluation Media/Open Text Exceed 14 x86/Program here.txt
 ;; c:/Program Files/Open Text Evaluation Media/Open Text Exceed 14 x86/Program Files/Hummingbird/
 ;; c:\Program Files\Open Text Evaluation Media\Open Text Exceed 14 x86\Program Files\Hummingbird\
-;;
 ;; c:\Program Files\Freescale\CW for MPC55xx and MPC56xx 2.10\PowerPC_EABI_Tools\Command_Line_Tools\CLT_Usage_Notes.txt
-;; C:\temp\prog.log or prog1.exe on Windows or /var/log/prog.log on Unix.
+;; C:\temp\program.log on Windows or /var/log/program.log on Unix.
 
 (defvar ffap-file-name-with-spaces-flag (memq system-type '(ms-dos windows-nt))
-  "If non-nil, look for paths containing spaces in `ffap-string-at-point'.
+  "If non-nil, enable looking for paths with spaces in `ffap-string-at-point'.
 Enabled in W32 by default.")
 
 (defun ffap-cygwin-path (path)
@@ -1060,23 +1059,73 @@ Enabled in W32 by default.")
     path))
 
 (defun ffap-cygwin-convert (path)
-  "If Cygwin, convert \"<drive>:\" into \"/cygdrive/<drive>\"."
-  (if (string-match "cygwin" (emacs-version))
+  "If in Cygwin, convert \"<drive>:\" to \"/cygdrive/<drive>\"."
+  (if (eq system-type 'cygwin)
       (ffap-cygwin-path path)
     path))
 
+(defun ffap-search-backward-file-end (&optional path-separator end)
+  "Search backward position point where file would probably end.
+Optional PATH-SEPARATOR defaults to \"/\". The search maximum is
+`line-end-position' or optional END point.
+
+Suppose the cursor is somewhere that might be near end of file,
+the guessing would position point before punctuation (like comma)
+after the file extension:
+
+  C:\temp\file.log, which contain ....
+  =============================== (before)
+  ---------------- (after)
+
+
+  C:\temp\file.log on Windows or /tmp/file.log on Unix
+  =============================== (before)
+  ---------------- (after)
+
+The strategy is to search backward until PATH-SEPARATOR which defaults to
+\"/\" and then take educated guesses.
+
+Move point and return point if an adjustment was done."
+  (or path-separator
+      (setq path-separator "/"))
+  (let (point
+	puct
+	end
+	whitespace-p)
+    (when (re-search-backward
+	   (regexp-quote path-separator) (line-beginning-position) t)
+      (forward-char 1)			 ;at the very beginning of match
+      (when (looking-at ".*?\\([][<>()\"'`,.:;]\\)") ;until typical punctuation
+	(setq end (match-end 0))
+	(setq punct (match-string 1))
+	(setq whitespace-p (looking-at "[ \t\r\n]\\|$"))
+	(goto-char end)
+	(cond
+	 ((and (string-equal punct ".")
+	       whitespace-p)		     ;end of sentence
+	  (setq point (1- (point))))
+	 ((and (string-equal punct ".")
+	       (looking-at "[a-zA-Z0-9.]+")) ;possibly file extension
+	  (setq point (match-end 0)))
+	 (t
+	  (setq point (point)))))
+      (when point
+	(goto-char point)
+	point))))
+
 (defun ffap-search-forward-file-end (&optional path-separator)
-  "Position point at file's maximum ending (including spaces).
-Call `ffap-search-backward-file-end' to fine tune the point afterwards"
+  "Search PATH-SEPARATOR and position point at file's maximum ending (including spaces).
+Optional PATH-SEPARATOR defaults to \"/\".
+Call `ffap-search-backward-file-end' to refine the ending point."
   (or path-separator
       (setq path-separator "/"))
   (let* ((chars  ;expected chars in file name
-	  (concat "[^][<>()\"'`;,#*|"
+	  (concat "[^][^<>()\"'`;,#*|"
 		  ;; exclude the opposite as we know the separator
 		  (if (string-equal path-separator "/")
 		      "\\\\"
 		    "/")
-		  "\t\r\n^]"))
+		  "\t\r\n]"))
 	 (re (concat
 	      chars "*"
 	      (if path-separator
@@ -1085,38 +1134,6 @@ Call `ffap-search-backward-file-end' to fine tune the point afterwards"
 	      chars "*")))
     (when (looking-at re)
       (goto-char (match-end 0)))))
-
-(defun ffap-search-backward-file-end (&optional path-separator)
-  "Search backward and guess where file would probably end.
-Suppose the cursor is somewhere that contains spaces. The real file end
-is in fact somewhere else. A demonstration:
-
-  C:\temp\file.log on Windows or /tmp/file.log on Unix
-  =============================== (now)
-  ---------------- (final)
-
-The strategy is to search backward until PATH-SEPARATOR which defaults to
-\"/\" and then take educated guesses.
-
-If found, move point and return point."
-  (or path-separator
-      (setq path-separator "/"))
-  (let ((opoint (point))
-	point)
-    (when (re-search-backward
-	   (regexp-quote path-separator) (line-beginning-position) t)
-      (forward-char 1)
-      (cond
-       ((looking-at ".*?\\.")
-	(goto-char (match-end 0))
-	(cond
-	 ((looking-at "[ \t\r\n]\\|$")
-	  (setq point (1- (point))))
-	 ((looking-at "[a-zA-Z0-9.]+")	;file extension
-	  (setq point (match-end 0))))))
-      (when point
-	(goto-char point)
-	point))))
 
 (defun ffap-path-separator-near-point ()
   "Search backward and forward for closest slash or backlash in line.
