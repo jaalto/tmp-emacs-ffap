@@ -1162,8 +1162,7 @@ syntax parameters in `ffap-string-at-point-mode-alist'.
 If MODE is not found, we use `file' instead of MODE.
 If the region is active, return a string from the region.
 Sets `ffap-string-at-point' and `ffap-string-at-point-region'."
-  (let* ((cygwin-p (string-match "cygwin" (emacs-version)))
-	 dir-separator
+  (let* (dir-separator
 	 beg
 	 end
 	 (args
